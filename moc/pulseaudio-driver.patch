@@ -1,0 +1,317 @@
+Index: configure.in
+===================================================================
+--- configure.in	(wersja 2586)
++++ configure.in	(kopia robocza)
+@@ -231,6 +231,21 @@
+ 	     [true])
+ fi
+ 
++AC_ARG_WITH(pulseaudio, AS_HELP_STRING([--without-pulseaudio],
++                                 [Compile without pulseaudio support]))
++
++if test "x$with_pulseaudio" != "xno"
++then
++	PKG_CHECK_MODULES(PULSEAUDIO, [libpulse-simple >= 1.1],
++	     [SOUND_DRIVERS="$SOUND_DRIVERS PULSEAUDIO"
++	      EXTRA_OBJS="$EXTRA_OBJS pulseaudio.o"
++	      AC_DEFINE([HAVE_PULSEAUDIO], 1, [Define if you have pulseaudio.])
++	      EXTRA_LIBS="$EXTRA_LIBS $PULSEAUDIO_LIBS"
++	      CFLAGS="$CFLAGS $PULSEAUDIO_CFLAGS"
++	      need_usleep="yes"],
++	     [true])
++fi
++
+ AC_ARG_WITH(jack, AS_HELP_STRING([--without-jack],
+                                  [Compile without JACK support]))
+ 
+@@ -252,7 +267,7 @@
+ AC_SUBST([SOUNDDRIVER])
+ case "$host_os" in
+ 	openbsd*) SOUNDDRIVER="SNDIO:JACK:OSS";;
+-	       *) SOUNDDRIVER="JACK:ALSA:OSS";;
++	       *) SOUNDDRIVER="JACK:ALSA:OSS:PULSEAUDIO";;
+ esac
+ 
+ AC_ARG_ENABLE(debug, AS_HELP_STRING([--enable-debug],
+Index: pulseaudio.c
+===================================================================
+--- pulseaudio.c	(wersja 0)
++++ pulseaudio.c	(wersja 0)
+@@ -0,0 +1,200 @@
++/*
++ * MOC - music on console
++ * Copyright (C) 2004 Marcin Sobczyk <tinez@tlen.pl>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#define DEBUG
++
++#include <stdlib.h>
++#include <assert.h>
++#include <string.h>
++#include <errno.h>
++#include <unistd.h>
++#include <pulse/error.h>
++#include <pulse/simple.h>
++
++#include "common.h"
++#include "server.h"
++#include "audio.h"
++#include "options.h"
++#include "log.h"
++
++static pa_simple *handle = NULL;
++static pa_sample_spec params;
++
++/* Scale the mixer value to 0-100 range for first and second channel */
++#define scale_volume1(v) ((v) - mixer1_min) * 100 / (mixer1_max - mixer1_min)
++#define scale_volume2(v) ((v) - mixer2_min) * 100 / (mixer2_max - mixer2_min)
++
++static int pulseaudio_init (struct output_driver_caps *caps)
++{
++	logit ("Initialising pulseaudio device");
++
++	caps->min_channels = 1;
++	caps->max_channels = PA_CHANNELS_MAX;
++	caps->formats = SFMT_NE | SFMT_U8 | SFMT_S16 | SFMT_S32 | SFMT_FLOAT;
++
++	logit("Driver initialized");
++
++	return 1;
++}
++
++static void pulseaudio_shutdown ()
++{
++	logit ("Shutting down pulseaudio");
++}
++
++static int pulseaudio_open (struct sound_params *sound_params)
++{
++	int err;
++	char fmt_name[128];
++	
++	long endianness = sound_params->fmt & SFMT_MASK_ENDIANNESS;
++	long format = sound_params->fmt & SFMT_MASK_FORMAT;
++
++	switch (format) {
++		case SFMT_U8:
++			params.format = PA_SAMPLE_U8;
++			break;
++		case SFMT_S16:
++			params.format = ((endianness == SFMT_LE) ? PA_SAMPLE_S16LE : PA_SAMPLE_S16BE);
++			break;
++		case SFMT_S32:
++			params.format = ((endianness == SFMT_LE) ? PA_SAMPLE_S32LE : PA_SAMPLE_S32BE);
++			break;
++		case SFMT_U32:
++			params.format = ((endianness == SFMT_LE) ? PA_SAMPLE_FLOAT32LE : PA_SAMPLE_FLOAT32BE);
++			break;
++		default:
++			error ("Unknown sample format: %s",
++					sfmt_str(sound_params->fmt, fmt_name,
++						sizeof(fmt_name)));
++			params.format = PA_SAMPLE_INVALID;
++			return 0;
++	}
++
++	params.channels = sound_params->channels;
++	params.rate = sound_params->rate;
++
++	handle = pa_simple_new (NULL,
++				"moc",
++				PA_STREAM_PLAYBACK,
++				NULL,
++				"Music",
++				&params,
++				NULL,
++				NULL,
++				&err);
++
++	if (handle == NULL) {
++		error ("Initializing pulseaudio client failed: %s", pa_strerror (err));
++		return 0;
++	}
++
++	logit ("Pulseaudio client opened");
++	return 1;
++}
++
++static void pulseaudio_close ()
++{
++	int err;
++
++	assert (handle != NULL);
++
++	if (pa_simple_drain (handle, &err) < 0)
++		error ("Cannot drain pulseaudio stream: %s", pa_strerror (err));
++
++	pa_simple_free (handle);
++	logit ("Pulseaudio client closed");
++
++	params.format = PA_SAMPLE_INVALID;
++	params.rate = 0;
++	params.channels = 0;
++	handle = NULL;
++}
++
++static int pulseaudio_play (const char *buff, const size_t size)
++{
++	int err;
++	
++	debug ("Got %d bytes to play", (int)size);
++	
++	if (pa_simple_write (handle, buff, size, &err) < 0) {
++		error ("Error writing to pulseaudio: %s", pa_strerror (err));
++		return -1;
++	}
++	
++	return size;
++}
++
++static int pulseaudio_read_mixer ()
++{
++	
++	return 100;
++}
++
++static void pulseaudio_set_mixer (int vol)
++{
++	(void) vol;
++}
++
++static int pulseaudio_get_buff_fill ()
++{
++	return 0;
++}
++
++static int pulseaudio_reset ()
++{
++	if (handle) {
++		int err;
++
++		if (pa_simple_drain (handle, &err) < 0) {
++			error ("Cannot drain pulseaudio stream: %s", pa_strerror (err));
++			return 0;
++		}
++	}
++	else
++		logit ("pulseaudio_reset() when the device is not opened.");
++	
++	return 1;
++}
++
++static int pulseaudio_get_rate ()
++{
++	return params.rate;
++}
++
++static void pulseaudio_toggle_mixer_channel ()
++{
++}
++
++static char *pulseaudio_get_mixer_channel_name ()
++{
++	return xstrdup ("Mixer N/A");
++}
++
++void pulseaudio_funcs (struct hw_funcs *funcs)
++{
++	funcs->init = pulseaudio_init;
++	funcs->shutdown = pulseaudio_shutdown;
++	funcs->open = pulseaudio_open;
++	funcs->close = pulseaudio_close;
++	funcs->play = pulseaudio_play;
++	funcs->read_mixer = pulseaudio_read_mixer;
++	funcs->set_mixer = pulseaudio_set_mixer;
++	funcs->get_buff_fill = pulseaudio_get_buff_fill;
++	funcs->reset = pulseaudio_reset;
++	funcs->get_rate = pulseaudio_get_rate;
++	funcs->toggle_mixer_channel = pulseaudio_toggle_mixer_channel;
++	funcs->get_mixer_channel_name = pulseaudio_get_mixer_channel_name;
++}
+Index: pulseaudio.h
+===================================================================
+--- pulseaudio.h	(wersja 0)
++++ pulseaudio.h	(wersja 0)
+@@ -0,0 +1,14 @@
++#ifndef PULSEAUDIO_H
++#define PULSEAUDIO_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void pulseaudio_funcs (struct hw_funcs *funcs);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+Index: audio.c
+===================================================================
+--- audio.c	(wersja 2586)
++++ audio.c	(kopia robocza)
+@@ -47,6 +47,9 @@
+ #ifdef HAVE_JACK
+ # include "jack.h"
+ #endif
++#ifdef HAVE_PULSEAUDIO
++# include "pulseaudio.h"
++#endif
+ 
+ #include "softmixer.h"
+ #include "equalizer.h"
+@@ -922,6 +925,15 @@
+ 		}
+ #endif
+ 
++#ifdef HAVE_PULSEAUDIO
++		if (!strcasecmp(name, "pulseaudio")) {
++			pulseaudio_funcs (funcs);
++			printf ("Trying PULSEAUDIO...\n");
++			if (funcs->init(&hw_caps))
++				return;
++		}
++#endif
++
+ #ifndef NDEBUG
+ 		if (!strcasecmp(name, "null")) {
+ 			null_funcs (funcs);
+Index: main.c
+===================================================================
+--- main.c	(wersja 2586)
++++ main.c	(kopia robocza)
+@@ -306,7 +306,7 @@
+ "-S --server            Run only the server.\n"
+ "-F --foreground        Run server in foreground, log to stdout.\n"
+ "-R --sound-driver LIST Use the first valid sound driver from LIST\n"
+-"                       (sndio, oss, alsa, jack, null).\n"
++"                       (sndio, oss, alsa, jack, pulseaudio, null).\n"
+ "-m --music-dir         Start in MusicDir.\n"
+ "-a --append            Append the files/directories/playlists passed in\n"
+ "                       the command line to playlist and exit.\n"
+Index: options.c
+===================================================================
+--- options.c	(wersja 2586)
++++ options.c	(kopia robocza)
+@@ -574,8 +574,8 @@
+ 	add_list ("SoundDriver", "SNDIO:JACK:OSS",
+ 	          CHECK_DISCRETE(5), "SNDIO", "Jack", "ALSA", "OSS", "null");
+ #else
+-	add_list ("SoundDriver", "Jack:ALSA:OSS",
+-	          CHECK_DISCRETE(5), "SNDIO", "Jack", "ALSA", "OSS", "null");
++	add_list ("SoundDriver", "Jack:ALSA:OSS:Pulseaudio",
++	          CHECK_DISCRETE(6), "SNDIO", "Jack", "ALSA", "OSS", "Pulseaudio", "null");
+ #endif
+ 
+ 	add_str  ("JackClientName", "moc", CHECK_NONE);

@@ -1,0 +1,15 @@
+Index: interface.c
+===================================================================
+--- interface.c	(wersja 2586)
++++ interface.c	(kopia robocza)
+@@ -1794,9 +1794,8 @@
+ 	}
+ 
+ 	if (!strcmp(file, "..")) {
+-		error ("Can't add '..'.");
+ 		free (file);
+-		return;
++		file = xstrdup(cwd);
+ 	}
+ 
+ 	iface_set_status ("Reading directories...");
